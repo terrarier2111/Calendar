@@ -1,26 +1,27 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use atomic_float::AtomicF64;
-use crate::Client;
-use crate::ui::wgpu::ctx;
-use crate::ui::wgpu::render::{ColorSource, GlyphId, Model, TexTy, Vertex};
+
+use crate::render::{ctx, GlyphId, Model, Vertex};
+
+pub type AppCtx = ();
 
 pub trait Component: Send + Sync {
     fn build_model(&self) -> Model;
 
     // fn is_inbounds(&self, pos: (f32, f32)) -> bool; // FIXME: is this one better?
 
-    fn do_render(&self, _client: &Arc<Client>) {}
+    fn do_render(&self, _client: &Arc<AppCtx>) {}
 
     fn pos(&self) -> (f32, f32);
 
     fn dims(&self) -> (f32, f32);
 
-    fn on_click(&mut self, client: &Arc<Client>);
+    fn on_click(&mut self, client: &Arc<AppCtx>);
 
-    fn on_scroll(&mut self, client: &Arc<Client>);
+    fn on_scroll(&mut self, client: &Arc<AppCtx>);
 
-    fn on_hover(&mut self, client: &Arc<Client>, mode: HoverMode);
+    fn on_hover(&mut self, client: &Arc<AppCtx>, mode: HoverMode);
 }
 
 #[derive(Copy, Clone)]
@@ -38,7 +39,7 @@ impl UIComponent {
         self.inner.build_model()
     }
 
-    pub fn on_mouse_click(&self, client: &Arc<Client>) {
+    pub fn on_mouse_click(&self, client: &Arc<AppCtx>) {
         self.inner.inner.write().unwrap().on_click(client);
         self.inner.make_dirty();
     }
@@ -91,16 +92,6 @@ impl Color {
     }
 }
 
-pub struct Tex {
-    // pub alpha: f32, // FIXME: try readding this!
-    pub ty: TexTy,
-}
-
-pub enum Coloring<const VERTICES: usize> {
-    Color([Color; VERTICES]),
-    Tex(Tex),
-}
-
 #[derive(Default)]
 pub struct ScrollData {
     min_y: AtomicF64,
@@ -137,19 +128,19 @@ impl Container {
         self.components.write().unwrap().clear();
     }
 
-    pub fn build_models(&self, client: &Arc<Client>) -> Vec<Model> {
+    pub fn build_models(&self, ctx: &Arc<AppCtx>) -> Vec<Model> {
         let mut models = vec![];
         for component in self.components.read().unwrap().iter() {
             models.push(component.build_model());
-            component.inner.inner.read().unwrap().do_render(client);
+            component.inner.inner.read().unwrap().do_render(ctx);
         }
         models
     }
 
-    pub fn on_mouse_click(&self, client: &Arc<Client>, pos: (f64, f64)) {
+    pub fn on_mouse_click(&self, ctx: &Arc<AppCtx>, pos: (f64, f64)) {
         for component in self.components.read().unwrap().iter() {
             if component.is_inbounds((pos.0 as f32, pos.1 as f32)) { // FIXME: switch to using f64 instead!
-                component.on_mouse_click(client);
+                component.on_mouse_click(ctx);
                 return;
             }
         }
@@ -159,7 +150,7 @@ impl Container {
 pub struct Button<T: Send + Sync = ()> {
     pub inner_box: TextBox,
     pub data: T,
-    pub on_click: Arc<Box<dyn Fn(&mut Button<T>, &Arc<Client>) + Send + Sync>>,
+    pub on_click: Arc<Box<dyn Fn(&mut Button<T>, &Arc<AppCtx>) + Send + Sync>>,
 }
 
 impl<T: Send + Sync> Component for Button<T> {
@@ -167,7 +158,7 @@ impl<T: Send + Sync> Component for Button<T> {
         self.inner_box.build_model()
     }
 
-    fn do_render(&self, client: &Arc<Client>) {
+    fn do_render(&self, client: &Arc<AppCtx>) {
         self.inner_box.do_render(client)
     }
 
@@ -179,21 +170,21 @@ impl<T: Send + Sync> Component for Button<T> {
         self.inner_box.dims()
     }
 
-    fn on_click(&mut self, client: &Arc<Client>) {
+    fn on_click(&mut self, ctx: &Arc<AppCtx>) {
         let func = self.on_click.clone();
-        func(self, client);
+        func(self, ctx);
     }
 
-    fn on_scroll(&mut self, _client: &Arc<Client>) {}
+    fn on_scroll(&mut self, _ctx: &Arc<AppCtx>) {}
 
-    fn on_hover(&mut self, _client: &Arc<Client>, _mode: HoverMode) {}
+    fn on_hover(&mut self, _ctx: &Arc<AppCtx>, _mode: HoverMode) {}
 }
 
 pub struct ColorBox {
     pub pos: (f32, f32),
     pub width: f32,
     pub height: f32,
-    pub coloring: Coloring<6>,
+    pub coloring: [Color; 6],
 }
 
 impl Component for ColorBox {
@@ -213,39 +204,18 @@ impl Component for ColorBox {
                 2.0 * self.height - 1.0 + y_off,
             ],
         ];
-        let vertices = match &self.coloring {
-            Coloring::Color(colors) => {
-                let mut ret = Vec::with_capacity(6);
+        let vertices = {
+            let mut ret = Vec::with_capacity(6);
                 for (i, pos) in vertices.into_iter().enumerate() {
                     ret.push(Vertex::GenericColor {
                         pos,
-                        color: colors[i].into_array(),
+                        color: self.coloring[i].into_array(),
                     });
                 }
                 ret
-            }
-            Coloring::Tex(tex) => {
-                let mut ret = Vec::with_capacity(6);
-                for pos in vertices {
-                    ret.push(Vertex::GenericAtlas {
-                        pos,
-                        alpha: 1.0, // FIXME: make this actually parameterized!
-                        uv: match &tex.ty {
-                            TexTy::Atlas(atlas) => atlas.uv().into_tuple(),
-                        },
-                    });
-                }
-                ret
-            }
         };
         Model {
             vertices,
-            color_src: match &self.coloring {
-                Coloring::Color(_) => ColorSource::PerVert,
-                Coloring::Tex(tex) => match &tex.ty {
-                    TexTy::Atlas(atlas) => ColorSource::Atlas(atlas.atlas().clone()),
-                },
-            },
         }
     }
 
@@ -257,18 +227,18 @@ impl Component for ColorBox {
         (self.width, self.height)
     }
 
-    fn on_click(&mut self, _client: &Arc<Client>) {}
+    fn on_click(&mut self, _client: &Arc<AppCtx>) {}
 
-    fn on_scroll(&mut self, _client: &Arc<Client>) {}
+    fn on_scroll(&mut self, _client: &Arc<AppCtx>) {}
 
-    fn on_hover(&mut self, _client: &Arc<Client>, _mode: HoverMode) {}
+    fn on_hover(&mut self, _client: &Arc<AppCtx>, _mode: HoverMode) {}
 }
 
 pub struct TextBox {
     pub pos: (f32, f32),
     pub width: f32,
     pub height: f32,
-    pub coloring: Coloring<6>,
+    pub coloring: [Color; 6],
     pub texts: Vec<GlyphId>,
 }
 
@@ -290,43 +260,22 @@ impl Component for TextBox {
                 2.0 * self.height - 1.0 + y_off,
             ],
         ];
-        let vertices = match &self.coloring {
-            Coloring::Color(colors) => {
-                let mut ret = Vec::with_capacity(6);
+        let vertices = {
+            let mut ret = Vec::with_capacity(6);
                 for (i, pos) in vertices.into_iter().enumerate() {
                     ret.push(Vertex::GenericColor {
                         pos,
-                        color: colors[i].into_array(),
+                        color: self.coloring[i].into_array(),
                     });
                 }
                 ret
-            }
-            Coloring::Tex(tex) => {
-                let mut ret = Vec::with_capacity(6);
-                for pos in vertices {
-                    ret.push(Vertex::GenericAtlas {
-                        pos,
-                        alpha: 1.0, // FIXME: make this actually parameterized!
-                        uv: match &tex.ty {
-                            TexTy::Atlas(atlas) => atlas.uv().into_tuple(),
-                        },
-                    });
-                }
-                ret
-            }
         };
         Model {
             vertices,
-            color_src: match &self.coloring {
-                Coloring::Color(_) => ColorSource::PerVert,
-                Coloring::Tex(tex) => match &tex.ty {
-                    TexTy::Atlas(atlas) => ColorSource::Atlas(atlas.atlas().clone()),
-                },
-            },
         }
     }
 
-    fn do_render(&self, _client: &Arc<Client>) {}
+    fn do_render(&self, _client: &Arc<AppCtx>) {}
 
     fn pos(&self) -> (f32, f32) {
         self.pos
@@ -336,11 +285,11 @@ impl Component for TextBox {
         (self.width, self.height)
     }
 
-    fn on_click(&mut self, _client: &Arc<Client>) {}
+    fn on_click(&mut self, _client: &Arc<AppCtx>) {}
 
-    fn on_scroll(&mut self, _client: &Arc<Client>) {}
+    fn on_scroll(&mut self, _client: &Arc<AppCtx>) {}
 
-    fn on_hover(&mut self, _client: &Arc<Client>, _mode: HoverMode) {}
+    fn on_hover(&mut self, _client: &Arc<AppCtx>, _mode: HoverMode) {}
 }
 
 impl Drop for TextBox {

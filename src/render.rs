@@ -1,9 +1,12 @@
 use std::cell::RefCell;
 use std::sync::atomic::AtomicUsize;
+use std::sync::OnceLock;
 use bytemuck_derive::Pod;
 use bytemuck_derive::Zeroable;
 use flume::Sender;
 use glyphon::AttrsOwned;
+use glyphon::Cache;
+use glyphon::Viewport;
 use wgpu::StoreOp;
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -19,6 +22,21 @@ use wgpu_biolerless::{
 };
 use winit::window::Window;
 
+pub(crate) struct UiCtx {
+    pub(crate) renderer: Arc<Renderer>,
+    pub(crate) window: Arc<Window>,
+}
+
+static UI_CTX: OnceLock<Arc<UiCtx>> = OnceLock::new();
+
+pub(crate) fn ctx() -> &'static Arc<UiCtx> {
+    UI_CTX.get().unwrap()
+}
+
+pub(crate) fn init(val: Arc<UiCtx>) {
+    UI_CTX.set(val).map_err(|_| ()).expect("set ui ctx twice!");
+}
+
 pub(crate) const LIGHT_GRAY_GPU: wgpu::Color = wgpu::Color {
     r: 0.384,
     g: 0.396,
@@ -28,9 +46,8 @@ pub(crate) const LIGHT_GRAY_GPU: wgpu::Color = wgpu::Color {
 
 pub struct Renderer {
     pub state: Arc<State>,
-    tex_generic_pipeline: RenderPipeline,
+    glyph_cache: Cache,
     color_generic_pipeline: RenderPipeline,
-    tex_circle_pipeline: RenderPipeline,
     color_circle_pipeline: RenderPipeline,
     pub dimensions: Dimensions,
     glyphs: Mutex<HashMap<usize, CompiledGlyph>>,
@@ -122,13 +139,13 @@ struct CompiledGlyph {
 impl Renderer {
     pub fn new(state: Arc<State>, window: &Window) -> anyhow::Result<Self> {
         let (width, height) = window.window_size();
-        let mut atlas = TextAtlas::new(state.device(), state.queue(), state.format());
+        let cache = Cache::new(state.device());
+        let mut atlas = TextAtlas::new(state.device(), state.queue(), &cache, state.format());
         let renderer = TextRenderer::new(&mut atlas, state.device(), MultisampleState::default(), None);
         Ok(Self {
-            tex_generic_pipeline: Self::atlas_generic_pipeline(&state),
             color_generic_pipeline: Self::color_generic_pipeline(&state),
-            tex_circle_pipeline: Self::atlas_circle_pipeline(&state),
             color_circle_pipeline: Self::color_circle_pipeline(&state),
+            glyph_cache: cache,
             state,
             dimensions: Dimensions::new(width, height),
             glyphs: Mutex::new(HashMap::new()),
@@ -145,11 +162,16 @@ impl Renderer {
     pub fn render(
         &self,
         models: Vec<Model>,
-        atlas: Arc<Atlas>, /*atlases: Arc<Mutex<Vec<Arc<Atlas>>>>*/
     ) {
         let glyph_ctx = self.glyph_ctx.lock().unwrap();
         let mut text_atlas = glyph_ctx.atlas.borrow_mut();
         let mut renderer = glyph_ctx.renderer.borrow_mut();
+        let vp = {
+            let config = self.state.raw_inner_surface_config();
+            let mut vp = Viewport::new(self.state.device(), &self.glyph_cache);
+            vp.update(self.state.queue(), Resolution { width: config.width, height: config.height });
+            vp
+        };
         {
             let (width, height) = self.dimensions.get();
             let mut font_system = self.font_system.lock().unwrap();
@@ -168,6 +190,7 @@ impl Renderer {
                         bottom: (height as f32 * (glyph.info.y_offset + glyph.info.size.1)) as i32,
                     },
                     default_color: glyph.info.color,
+                    custom_glyphs: &[],
                 }
         }).collect::<Vec<_>>();
             renderer.deref_mut()
@@ -176,10 +199,7 @@ impl Renderer {
                     self.state.queue(),
                     &mut font_system,
                     text_atlas.deref_mut(),
-                    Resolution {
-                        width: config.width,
-                        height: config.height,
-                    },
+                    &vp,
                     glyphs,
                     glyph_ctx.cache.borrow_mut().deref_mut(),
                 )
@@ -189,68 +209,20 @@ impl Renderer {
         self.state
             .render(
                 |view, mut encoder, state| {
-                    /*for atlas in atlases.lock().unwrap().iter() {
-                        atlas.update(&mut encoder);
-                    }*/
-                    atlas.update(&mut encoder);
-                    let mut generic_atlas_models: HashMap<AtlasId, Vec<GenericAtlasVertex>> = HashMap::new();
                     let mut generic_color_models = vec![];
-                    let mut circle_atlas_models: HashMap<AtlasId, Vec<CircleAtlasVertex>> = HashMap::new();
                     let mut circle_color_models = vec![];
                     for model in models {
-                        match &model.color_src {
-                            ColorSource::PerVert => {
-                                model.vertices.into_iter().for_each(
-                                    |vert| match vert {
-                                        Vertex::GenericColor { pos, color } => generic_color_models.push(GenericColorVertex { pos, color }),
-                                        Vertex::GenericAtlas { .. } => abort(), // FIXME: is it really necessary to abort because of perf stuff?
-                                        Vertex::CircleColor { pos, color, radius, border_thickness } => circle_color_models.push(CircleColorVertex {
-                                            pos,
-                                            color,
-                                            radius,
-                                            border_thickness,
-                                        }),
-                                        Vertex::CircleAtlas { .. } => abort(),
-                                    },
-                                );
-                            }
-                            ColorSource::Atlas(atlas) => {
-                                // FIXME: make different atlases work!
-                                let mut generic_vertices = vec![];
-                                let mut circle_vertices = vec![];
-                                model.vertices.into_iter().for_each(|vert| match vert {
-                                    Vertex::GenericColor { .. } => abort(),
-                                    Vertex::GenericAtlas { pos, alpha, uv } => generic_vertices.push(GenericAtlasVertex {
-                                        pos,
-                                        alpha,
-                                        uv,
-                                    }),
-                                    Vertex::CircleColor { .. } => abort(),
-                                    Vertex::CircleAtlas { pos, alpha, uv, radius, border_thickness } => circle_vertices.push(CircleAtlasVertex {
-                                        pos,
-                                        alpha,
-                                        uv,
-                                        radius,
-                                        border_thickness,
-                                    }),
-                                });
-                                if !generic_vertices.is_empty() {
-                                    if let Some(models) = generic_atlas_models.get_mut(&atlas.id()) {
-                                        models.extend(generic_vertices);
-                                    } else {
-                                        generic_atlas_models
-                                            .insert(atlas.id(), generic_vertices);
-                                    }
-                                } else {
-                                    if let Some(models) = circle_atlas_models.get_mut(&atlas.id()) {
-                                        models.extend(circle_vertices);
-                                    } else {
-                                        circle_atlas_models
-                                            .insert(atlas.id(), circle_vertices);
-                                    }
-                                }
-                            }
-                        }
+                        model.vertices.into_iter().for_each(
+                            |vert| match vert {
+                                Vertex::GenericColor { pos, color } => generic_color_models.push(GenericColorVertex { pos, color }),
+                                Vertex::CircleColor { pos, color, radius, border_thickness } => circle_color_models.push(CircleColorVertex {
+                                    pos,
+                                    color,
+                                    radius,
+                                    border_thickness,
+                                }),
+                            },
+                        );
                     }
                     let generic_color_buffer =
                         state.create_buffer(generic_color_models.as_slice(), BufferUsages::VERTEX);
@@ -277,7 +249,7 @@ impl Renderer {
                         render_pass.set_pipeline(&self.color_circle_pipeline);
                         render_pass.draw(0..(circle_color_models.len() as u32), 0..1);
 
-                        renderer.render(text_atlas.deref(), &mut render_pass).unwrap();
+                        renderer.render(text_atlas.deref(), &vp, &mut render_pass).unwrap();
                     }
                     encoder
                 },
@@ -309,49 +281,6 @@ impl Renderer {
             .build(state)
     }
 
-    fn atlas_generic_pipeline(state: &State) -> RenderPipeline {
-        PipelineBuilder::new()
-            .vertex(VertexShaderState {
-                entry_point: "main_vert",
-                buffers: &[GenericAtlasVertex::desc()],
-            })
-            .fragment(FragmentShaderState {
-                entry_point: "main_frag",
-                targets: &[Some(ColorTargetState {
-                    format: state.format(),
-                    blend: Some(BlendState::REPLACE),
-                    write_mask: ColorWrites::ALL,
-                })],
-            })
-            .shader_src(ShaderModuleSources::Single(ModuleSrc::Source(
-                ShaderSource::Wgsl(include_str!("ui_atlas_generic.wgsl").into()),
-            )))
-            .layout(&state.create_pipeline_layout(
-                &[&state.create_bind_group_layout(&[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: TextureViewDimension::D2,
-                            sample_type: TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::FRAGMENT,
-                        // This should match the filterable field of the
-                        // corresponding Texture entry above.
-                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ])],
-                &[],
-            ))
-            .build(state)
-    }
-
     fn color_circle_pipeline(state: &State) -> RenderPipeline {
         PipelineBuilder::new()
             .vertex(VertexShaderState {
@@ -370,49 +299,6 @@ impl Renderer {
                 ShaderSource::Wgsl(include_str!("ui_color_circle.wgsl").into()),
             )))
             .layout(&state.create_pipeline_layout(&[], &[]))
-            .build(state)
-    }
-
-    fn atlas_circle_pipeline(state: &State) -> RenderPipeline {
-        PipelineBuilder::new()
-            .vertex(VertexShaderState {
-                entry_point: "main_vert",
-                buffers: &[CircleAtlasVertex::desc()],
-            })
-            .fragment(FragmentShaderState {
-                entry_point: "main_frag",
-                targets: &[Some(ColorTargetState {
-                    format: state.format(),
-                    blend: Some(BlendState::REPLACE),
-                    write_mask: ColorWrites::ALL,
-                })],
-            })
-            .shader_src(ShaderModuleSources::Single(ModuleSrc::Source(
-                ShaderSource::Wgsl(include_str!("ui_atlas_circle.wgsl").into()),
-            )))
-            .layout(&state.create_pipeline_layout(
-                &[&state.create_bind_group_layout(&[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: TextureViewDimension::D2,
-                            sample_type: TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::FRAGMENT,
-                        // This should match the filterable field of the
-                        // corresponding Texture entry above.
-                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ])],
-                &[],
-            ))
             .build(state)
     }
 
@@ -449,7 +335,7 @@ impl Renderer {
         let metrics = Metrics { font_size: info.size.0 * width as f32, line_height: info.size.1 * height as f32 };
         let mut buffer = Buffer::new(font_system, metrics);
 
-        buffer.set_size(font_system, info.size.0 * width as f32, info.size.1 * height as f32);
+        buffer.set_size(font_system, Some(info.size.0 * width as f32), Some(info.size.1 * height as f32));
         buffer.set_text(font_system, info.text.as_str(), info.attrs.as_attrs(), info.shaping);
         buffer
     }
