@@ -1,0 +1,18 @@
+[package]
+name = "Calendar"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+winit = "0.30"
+wgpu = "22"
+wgpu-biolerless = { git = "https://github.com/terrarier2111/wgpu-boilerless", features = ["winit"] }
+pollster = "0"
+#reqwest = "0"
+web_ical = "0"
+serde = "1"
+serde_json = "1"
+serde_derive = "1"
+dirs = "5"
+fnv = "1"
+glyphon = "0"
