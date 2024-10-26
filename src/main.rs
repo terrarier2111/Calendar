@@ -1,148 +1,88 @@
 mod config;
-mod ui;
-mod render;
-mod screen_sys;
 
 use std::sync::{Arc, Mutex, RwLock};
+use chrono::{Days, Utc};
+use iced::widget::{
+    button, center, checkbox, column, horizontal_rule, pick_list, progress_bar,
+    row, scrollable, slider, text, text_input, toggler, vertical_rule,
+    vertical_space,
+};
+use iced::{Center, Element, Fill, Theme};
 
 use config::Config;
-use glyphon::{Attrs, AttrsOwned, Color, Shaping};
-use render::{ctx, GlyphId, GlyphInfo, Renderer, UiCtx};
-use screen_sys::Screen;
-use ui::{Container, TextBox};
-use winit::{
-    event::{Event, WindowEvent}, event_loop::{ActiveEventLoop, EventLoopBuilder}, window::WindowAttributes
-};
+use tokio::runtime::{Builder, Runtime};
 
 fn main() {
-    let event_loop = EventLoopBuilder::<()>::default().build().unwrap();
-    let window = Arc::new(
-        event_loop
-            .create_window(WindowAttributes::default().with_title("RustSpeak"))
-            .unwrap(),
-    );
-    let state =
-        Arc::new(pollster::block_on(wgpu_biolerless::StateBuilder::new().window(window.clone()).build()).unwrap());
-    let renderer = Arc::new(Renderer::new(state.clone(), &window).unwrap());
-    let config = Config::load();
-    render::init(Arc::new(UiCtx {
-        renderer: renderer.clone(),
-        window: window.clone(),
-    }));
-    let screen_sys = Arc::new(screen_sys::ScreenSystem::new());
-    screen_sys.push_screen(Box::new(DefaultScreen::new()));
-    event_loop
-        .run(move |event, control_flow| {
-            let redraw = || {
-                let models = screen_sys.tick(&Arc::new(()), &window);
-                renderer.render(models);
-            };
-            match event {
-                Event::WindowEvent { window_id, event } if window_id == window.id() => {
-                    match event {
-                        WindowEvent::Resized(size) => {
-                            if !state.resize(size) {
-                                panic!("Couldn't resize!");
-                            } else {
-                                renderer.dimensions.set(size.width, size.height);
-                            }
-                            renderer.rescale_glyphs();
-                            redraw();
-                        }
-                        WindowEvent::Moved(_) => {}
-                        WindowEvent::CloseRequested => {
-                            control_flow.exit();
-                        }
-                        WindowEvent::Destroyed => {}
-                        WindowEvent::DroppedFile(_) => {}
-                        WindowEvent::HoveredFile(_) => {}
-                        WindowEvent::HoveredFileCancelled => {}
-                        WindowEvent::Focused(_) => {}
-                        WindowEvent::KeyboardInput { event, .. } => {}
-                        WindowEvent::ModifiersChanged(_) => {}
-                        WindowEvent::CursorMoved { position, .. } => {}
-                        WindowEvent::CursorEntered { .. } => {}
-                        WindowEvent::CursorLeft { .. } => {}
-                        WindowEvent::MouseWheel { .. } => {}
-                        WindowEvent::MouseInput { button, state, .. } => {}
-                        WindowEvent::TouchpadPressure { .. } => {}
-                        WindowEvent::AxisMotion { .. } => {}
-                        WindowEvent::Touch(_) => {}
-                        WindowEvent::ScaleFactorChanged {
-                            scale_factor,
-                            inner_size_writer,
-                        } => {
-                            if !state.resize((
-                                (state.size().1 as f64 * scale_factor) as u32,
-                                state.size().1,
-                            )) {
-                                panic!("Couldn't resize!");
-                            }
-                            renderer.rescale_glyphs();
-                            redraw();
-                        }
-                        WindowEvent::ThemeChanged(_) => {}
-                        WindowEvent::Occluded(_) => {}
-                        WindowEvent::RedrawRequested => {
-                            // perform redraw
-                            redraw();
-                        }
-                        _ => {}
+    iced::application("Styling - Iced", Calendar::update, Calendar::view)
+        .run().unwrap()
+}
+
+struct Calendar {
+    config: Config,
+    // the number of days offset from the current day
+    curr_view: isize,
+    rt: Runtime,
+}
+
+impl Default for Calendar {
+    fn default() -> Self {
+        Self { config: Config::load(), curr_view: 0, rt: Builder::new_current_thread().enable_time().enable_io().build().unwrap() }
+    }
+}
+
+impl Calendar {
+
+    fn update(&mut self, message: Message) {
+
+    }
+
+    fn view(&self) -> Element<Message> {
+        println!("view!");
+        /*let mut days = {
+            let mut days = vec![];
+            for _ in 0..7 {
+                days.push(vec![]);
+            }
+            days
+        };*/
+        let now = Utc::now();
+        for cal in &self.config.calendars {
+            println!("got cal!");
+            for event in cal.get_events(&self.rt).iter() {
+                println!("got events: start {} ende {} name {} loc {} rep {:?}", event.start, event.finish, event.name, event.location, event.repeat/*reqwest::get(&event.name).unwrap().text().unwrap()*/);
+                if event.start == 0 {
+                    continue;
+                }
+                println!("passed 0");
+                if chrono::DateTime::from_timestamp_millis(event.start as i64).unwrap().checked_sub_days(Days::new(7)).unwrap() > chrono::Utc::now() {
+                    continue;
+                }
+                println!("passed 1");
+                if chrono::DateTime::from_timestamp_millis(event.finish as i64).unwrap() < chrono::Utc::now() {
+                    continue;
+                }
+                println!("passed checks");
+                let start = chrono::DateTime::from_timestamp_millis(event.start as i64).unwrap();
+                for i in 0..6 {
+                    if start.clone().checked_add_days(Days::new(i)).unwrap().date_naive() == now.date_naive() {
+                        /*days[i as usize].push(row![
+                            text(&event.name)
+                        ]);*/
+                        println!("Got {}", event.name);
                     }
                 }
-                Event::DeviceEvent { .. } => {}
-                Event::UserEvent(event) => {}
-                _ => {}
             }
-        })
-        .unwrap();
-}
-
-#[derive(Clone)]
-struct DefaultScreen {
-    render: Arc<Container>,
-}
-
-impl DefaultScreen {
-
-    fn new() -> Self {
-        Self {
-            render: Arc::new(Container::new()),
         }
+        let choose_theme = column![
+            text("Theme:")
+        ]
+        .spacing(10);
+        center(column![choose_theme]).into()
     }
 
 }
 
-impl Screen for DefaultScreen {
-    fn on_active(&mut self, _ctx: &Arc<screen_sys::AppCtx>) {
-        let glyph = ctx().renderer.add_glyph(GlyphInfo { in_bounds_off: (0.0, 0.0), size: (0.2, 0.2), text: "test".to_string(), attrs: AttrsOwned::new(Attrs::new()), shaping: Shaping::Basic, color: Color(u8::MAX as u32), scale: 1.0, x_offset: 0.0, y_offset: 0.0 });
-        self.render.add(Arc::new(RwLock::new(Box::new(TextBox {
-            pos: (0.0, 0.0),
-            width: 0.1,
-            height: 0.1,
-            coloring: [ui::Color {
-                r: 1.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            }; 6],
-            texts: vec![glyph],
-        }))));
-    }
-
-    fn on_deactive(&mut self, _ctx: &Arc<screen_sys::AppCtx>) {
-        self.render.clear();
-    }
-
-    fn tick(&mut self, _ctx: &Arc<screen_sys::AppCtx>) {
-        
-    }
-
-    fn container(&self) -> &Arc<ui::Container> {
-        &self.render
-    }
-
-    fn clone_screen(&self) -> Box<dyn Screen> {
-        Box::new(self.clone())
-    }
+#[derive(Debug)]
+enum Message {
+    RefreshCalendars,
 }

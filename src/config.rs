@@ -1,14 +1,15 @@
 use std::{
-    fs,
-    hash::{Hash, Hasher},
+    borrow::Cow, fs, hash::{Hash, Hasher}
 };
 
+use chrono::{DateTime, Utc};
 use fnv::FnvHasher;
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Runtime;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    calendars: Vec<Calendar>,
+    pub calendars: Vec<Calendar>,
 }
 
 impl Config {
@@ -16,18 +17,18 @@ impl Config {
         let mut path = dirs::config_dir().unwrap();
         path.push("HCal");
         let dir_path = path.clone();
-        path.set_file_name("config.json");
+        path.push("config.json");
         if !dir_path.exists() {
             fs::create_dir_all(dir_path).unwrap();
             fs::write(
                 &path,
-                serde_json::to_string_pretty(&Config { calendars: vec![] }).unwrap(),
+                serde_json::to_string_pretty(&Config { calendars: vec![Calendar { src: CalendarSrc::Web { src: "https://campus.kit.edu/sp/webcal/BJ1cj3pHrk".to_string() }, name: "test".to_string(), color: ConfigColor { r: 255, g: 0, b: 0, a: 255 } }] }).unwrap(),
             )
             .unwrap();
         }
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap()
     }
-
+    
     pub fn save(&self) {
         let mut path = dirs::config_dir().unwrap();
         path.push("HCal");
@@ -74,7 +75,24 @@ pub fn store_last_update(src: &str, last_update: u128) {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Calendar {
     src: CalendarSrc,
-    name: String,
+    pub name: String,
+    pub color: ConfigColor,
+}
+
+impl Calendar {
+
+    pub fn get_events(&self, rt: &Runtime) -> Cow<Vec<CalEvent>> {
+        match &self.src {
+            CalendarSrc::Web { src } => {
+                println!("fetch events");
+                Cow::Owned(rt.block_on(web_ical::Calendar::new(&src)).unwrap().events.into_iter().map(|event| {
+                    CalEvent { start: event.dtstart.as_ref().map(|dt| dt.timestamp_millis() as u64).unwrap_or(0), finish: event.dtend.as_ref().map(|dt| dt.timestamp_millis() as u64).unwrap_or(0), name: event.summary.unwrap_or(String::new()), location: event.location.unwrap_or(String::new()), repeat: event.repeat.map(|rep| Repeat { freq: rep.freq, until: rep.until.map(|val| val.timestamp_millis() as u64) }) }
+                }).collect::<Vec<CalEvent>>())
+            },
+            CalendarSrc::Local { events } => Cow::Borrowed(events),
+        }
+    }
+
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -84,7 +102,6 @@ pub enum CalendarSrc {
     },
     Local {
         events: Vec<CalEvent>,
-        color: ConfigColor,
     },
 }
 
@@ -93,6 +110,14 @@ pub struct CalEvent {
     pub start: u64,
     pub finish: u64,
     pub name: String,
+    pub location: String,
+    pub repeat: Option<Repeat>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Repeat {
+    pub freq: String,
+    pub until: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
