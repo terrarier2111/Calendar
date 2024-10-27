@@ -137,7 +137,7 @@ pub enum CalendarSrc {
     Local { events: Vec<CalEvent> },
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CalEvent {
     pub start: u64,
     pub finish: u64,

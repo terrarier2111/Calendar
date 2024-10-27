@@ -1,18 +1,18 @@
 mod config;
 
-use chrono::{Datelike, Days, NaiveTime, Timelike, Utc};
+use chrono::{Datelike, Days, NaiveTime, Timelike, Utc, Weekday};
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::container::bordered_box;
 use iced::widget::text::Wrapping;
 use iced::widget::{
     button, center, checkbox, column, horizontal_rule, pick_list, progress_bar, row, scrollable,
-    slider, text, text_input, toggler, vertical_rule, vertical_space, Column, Container, Row,
-    Space, Text,
+    slider, text, text_input, toggler, vertical_rule, vertical_space, Button, Column, Container,
+    Row, Space, Text,
 };
-use iced::{Center, Element, Fill, Length, Renderer, Shadow, Theme};
+use iced::{keyboard, Border, Center, Color, Element, Fill, Length, Renderer, Shadow, Theme};
 use std::sync::{Arc, Mutex, RwLock};
 
-use config::Config;
+use config::{CalEvent, Config};
 use tokio::runtime::{Builder, Runtime};
 
 fn main() {
@@ -27,18 +27,28 @@ struct Calendar {
     // the number of days offset from the current day
     curr_view: isize,
     rt: Runtime,
+    curr_render_event: Option<CalEvent>,
+    fetched_events: Vec<Vec<CalEvent>>,
 }
 
 impl Default for Calendar {
     fn default() -> Self {
+        let cfg = Config::load();
+        let rt = Builder::new_current_thread()
+            .enable_time()
+            .enable_io()
+            .build()
+            .unwrap();
         Self {
-            config: Config::load(),
+            fetched_events: cfg
+                .calendars
+                .iter()
+                .map(|cal| cal.get_events(&rt).into_owned())
+                .collect::<Vec<_>>(),
+            config: cfg,
             curr_view: 0,
-            rt: Builder::new_current_thread()
-                .enable_time()
-                .enable_io()
-                .build()
-                .unwrap(),
+            rt,
+            curr_render_event: None,
         }
     }
 }
@@ -48,9 +58,39 @@ impl Calendar {
         Theme::Dracula
     }
 
-    fn update(&mut self, message: Message) {}
+    fn update(&mut self, message: Message) {
+        match message {
+            Message::RefreshCalendars => todo!(),
+            Message::MainScreen => {
+                self.curr_render_event = None;
+            }
+            Message::ViewEvent(cal_event) => {
+                self.curr_render_event = Some(cal_event);
+            }
+        }
+    }
 
     fn view(&self) -> Element<Message> {
+        if let Some(event) = self.curr_render_event.as_ref() {
+            let start = chrono::DateTime::from_timestamp_millis(event.start as i64).unwrap();
+            let end = chrono::DateTime::from_timestamp_millis(event.finish as i64).unwrap();
+            let name = event.name.replace("\\, ", "\n");
+            let ev_text: Element<Message> = Text::new(format!(
+                "{} {}-{}\n{}\n{}",
+                wd_to_short_name(start.weekday()),
+                cut_off_end(&start.time().to_string(), 3),
+                cut_off_end(&end.time().to_string(), 3),
+                name,
+                &event.location
+            ))
+            .into();
+            let txt: Element<Message> = Text::new("Zurück").into();
+            let btn: Element<Message> =
+                Container::new(Button::new(txt).on_press(Message::MainScreen))
+                    .style(|theme| bordered_box(theme).border(Border::default().rounded(5)))
+                    .into();
+            return center(column![row![ev_text], row![btn]]).into();
+        }
         println!("view!");
         let mut days = {
             let mut days = vec![];
@@ -62,8 +102,10 @@ impl Calendar {
         let now = Utc::now();
         let mut earliest = u64::MAX;
         let mut latest = 0;
+        let mut ev_iter = self.fetched_events.iter();
         for cal in &self.config.calendars {
-            for event in cal.get_events(&self.rt).iter() {
+            let events = ev_iter.next().unwrap();
+            for event in events {
                 println!(
                     "got events: start {} ende {} name {} loc {} rep {:?}",
                     event.start,
@@ -216,18 +258,31 @@ impl Calendar {
                 // FIXME: support events that are happening at the same time (or overlapping)
                 let name = event.name.replace("\\, ", "\n");
                 day_col = day_col.push(
-                    Container::new(Text::new(format!(
-                        "({}-{})\n{}\n{}",
-                        cut_off_end(&start.time().to_string(), 3),
-                        cut_off_end(&end.time().to_string(), 3),
-                        name,
-                        &event.location
-                    )))
+                    Container::new(
+                        Button::new(Text::new(format!(
+                            "({}-{})\n{}\n{}",
+                            cut_off_end(&start.time().to_string(), 3),
+                            cut_off_end(&end.time().to_string(), 3),
+                            name,
+                            &event.location
+                        )))
+                        .on_press(Message::ViewEvent(event.clone()))
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    )
                     .width(Length::Fill)
                     .height(Length::FillPortion(
                         ((event.finish - event.start) / 1000 / 60 / 10 * 9 * 2) as u16,
                     ))
-                    .style(|theme| bordered_box(theme).shadow(Shadow::default())),
+                    .style(|theme| {
+                        bordered_box(theme)
+                            .shadow({
+                                let mut shadow = Shadow::default();
+                                shadow.color = Color::BLACK;
+                                shadow
+                            })
+                            .border(Border::default().rounded(100))
+                    }),
                 );
                 println!(
                     "raw day {}",
@@ -262,7 +317,26 @@ fn cut_off_end(val: &str, cut: usize) -> &str {
     &val[0..(val.len() - cut)]
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Message {
     RefreshCalendars,
+    MainScreen,
+    ViewEvent(CalEvent),
+}
+
+struct FetchedCalendar {
+    calendar: Calendar,
+    fetched_events: Vec<CalEvent>,
+}
+
+fn wd_to_short_name(wd: Weekday) -> &'static str {
+    match wd {
+        Weekday::Mon => "Mo",
+        Weekday::Tue => "Di",
+        Weekday::Wed => "Mi",
+        Weekday::Thu => "Do",
+        Weekday::Fri => "Fr",
+        Weekday::Sat => "Sa",
+        Weekday::Sun => "So",
+    }
 }
