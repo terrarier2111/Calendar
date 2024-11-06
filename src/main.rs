@@ -1,16 +1,12 @@
 mod config;
 
-use chrono::{Datelike, Days, NaiveTime, Timelike, Utc, Weekday};
-use iced::alignment::{Horizontal, Vertical};
+use chrono::{Datelike, Days, Timelike, Utc, Weekday};
 use iced::widget::container::bordered_box;
-use iced::widget::text::Wrapping;
 use iced::widget::{
-    button, center, checkbox, column, horizontal_rule, pick_list, progress_bar, row, scrollable,
-    slider, text, text_input, toggler, vertical_rule, vertical_space, Button, Column, Container,
+    center, column, row, Button, Column, Container,
     Row, Space, Text,
 };
-use iced::{keyboard, Border, Center, Color, Element, Fill, Length, Renderer, Shadow, Theme};
-use std::sync::{Arc, Mutex, RwLock};
+use iced::{Border, Color, Element, Length, Shadow, Theme};
 
 use config::{CalEvent, Config};
 use tokio::runtime::{Builder, Runtime};
@@ -197,7 +193,6 @@ impl Calendar {
                     }
                     for i in 0..6 {
                         if start
-                            .clone()
                             .checked_add_days(Days::new(i))
                             .unwrap()
                             .date_naive()

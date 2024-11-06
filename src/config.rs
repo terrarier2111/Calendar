@@ -4,7 +4,6 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use chrono::{DateTime, Utc};
 use fnv::FnvHasher;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
@@ -101,7 +100,7 @@ impl Calendar {
             CalendarSrc::Web { src } => {
                 println!("fetch events");
                 Cow::Owned(
-                    rt.block_on(web_ical::Calendar::new(&src))
+                    rt.block_on(web_ical::Calendar::new(src))
                         .unwrap()
                         .events
                         .into_iter()
@@ -116,8 +115,8 @@ impl Calendar {
                                 .as_ref()
                                 .map(|dt| dt.timestamp_millis() as u64)
                                 .unwrap_or(0),
-                            name: event.summary.unwrap_or(String::new()),
-                            location: event.location.unwrap_or(String::new()),
+                            name: event.summary.unwrap_or_default(),
+                            location: event.location.unwrap_or_default(),
                             repeat: event.repeat.map(|rep| Repeat {
                                 freq: rep.freq,
                                 until: rep.until.map(|val| val.timestamp_millis() as u64),
